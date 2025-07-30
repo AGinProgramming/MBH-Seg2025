@@ -310,6 +310,25 @@ def determine_num_input_channels(plans_manager: PlansManager,
         num_input_channels = num_modalities
     return num_input_channels
 
+class SoftLabelManager(LabelManager):
+  def convert_probabilities_to_soft_labels(self, predicted_probabilities):
+        # return probability distribution
+        return predicted_probabilities
+
+    def convert_logits_to_soft_labels(self, predicted_logits):
+        probs = self.apply_inference_nonlin(predicted_logits)
+        return self.convert_probabilities_to_soft_labels(probs)
+
+    def estimate_uncertainty(self, prob_samples: List[torch.Tensor]) -> torch.Tensor:
+        stacked = torch.stack(prob_samples)
+        mean_prob = stacked.mean(dim=0)
+        entropy = -(mean_prob * mean_prob.log()).sum(dim=0)
+        return entropy
+
+    def fuse_multi_annotator_labels(self, annotator_probs: List[np.ndarray]) -> np.ndarray:
+        # mean combination
+        return np.mean(np.stack(annotator_probs), axis=0)
+
 
 if __name__ == '__main__':
     # this code used to be able to differentiate variant 1 and 2 to measure time.
