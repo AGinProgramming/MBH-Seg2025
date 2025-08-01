@@ -1,6 +1,7 @@
 from typing import List
 
 import numpy as np
+import torch
 
 
 def collate_outputs(outputs: List[dict]):
@@ -18,6 +19,13 @@ def collate_outputs(outputs: List[dict]):
             collated[k] = np.vstack([o[k][None] for o in outputs])
         elif isinstance(outputs[0][k], list):
             collated[k] = [item for o in outputs for item in o[k]]
+        elif isinstance(outputs[0][k], dict):
+        # changes start
+        # 若 attention maps 是 dict，则递归调用 collate_outputs
+            collated[k] = collate_outputs([o[k] for o in outputs])
+        elif isinstance(outputs[0][k], torch.Tensor):
+            collated[k] = torch.stack([o[k] for o in outputs])
+        # changes over(could be more conditions)
         else:
             raise ValueError(f'Cannot collate input of type {type(outputs[0][k])}. '
                              f'Modify collate_outputs to add this functionality')

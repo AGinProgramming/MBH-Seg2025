@@ -99,6 +99,21 @@ class ConfigurationManager(object):
     def __repr__(self):
         return self.configuration.__repr__()
 
+# changes start
+    @property
+    def label_type(self) -> str:
+        return self.configuration.get('label_type', 'hard')
+    
+    @property
+    def loss_config(self) -> dict:
+        return self.configuration.get('loss', {})
+    
+    @property
+    def uncertainty_config(self) -> dict:
+        return self.configuration.get('uncertainty', {})
+    
+#changes over
+
     @property
     def data_identifier(self) -> str:
         return self.configuration['data_identifier']
@@ -167,6 +182,28 @@ class ConfigurationManager(object):
         fn = recursive_find_resampling_fn_by_name(self.configuration['resampling_fn_data'])
         fn = partial(fn, **self.configuration['resampling_fn_data_kwargs'])
         return fn
+# changes start    
+    @property
+    @lru_cache(maxsize=1)
+    def resampling_fn_softseg(self) -> Callable[
+        [Union[torch.Tensor, np.ndarray],
+         Union[Tuple[int, ...], List[int], np.ndarray],
+         Union[Tuple[float, ...], List[float], np.ndarray],
+         Union[Tuple[float, ...], List[float], np.ndarray]
+         ],
+        Union[torch.Tensor, np.ndarray]]:
+        if 'resampling_fn_softseg' in self.configuration:
+            fn = recursive_find_resampling_fn_by_name(self.configuration['resampling_fn_softseg'])
+            fn = partial(fn, **self.configuration.get('resampling_fn_softseg_kwargs', {}))
+            return fn
+        if 'resampling_fn_probabilities' in self.configuration:
+            fn = recursive_find_resampling_fn_by_name(self.configuration['resampling_fn_probabilities'])
+            fn = partial(fn, **self.configuration.get('resampling_fn_probabilities_kwargs', {}))
+            return fn
+        fn = recursive_find_resampling_fn_by_name(self.configuration['resampling_fn_seg'])
+        fn = partial(fn, **self.configuration['resampling_fn_seg_kwargs'])
+        return fn
+# changes over
 
     @property
     @lru_cache(maxsize=1)
@@ -293,6 +330,18 @@ class PlansManager(object):
     @property
     def available_configurations(self) -> List[str]:
         return list(self.plans['configurations'].keys())
+    
+# changes start
+    @property
+    def supports_soft_labels(self) -> bool:
+        try:
+            for cfg in self.plans.get('configurations', {}).values():
+                if cfg.get('label_type', 'hard') == 'soft':
+                    return True
+        except Exception:
+            pass
+        return False
+# changes over
 
     @property
     @lru_cache(maxsize=1)
@@ -335,7 +384,49 @@ if __name__ == '__main__':
         'batch_size': 4,
         'inherits_from': '3d_fullres'
     }
+# possible changes of design on plans to soft labels
+    plans['configurations']['3d_swinunet_fullres_soft'] = {
+           'inherits_from': '3d_fullres',
+        'label_type': 'soft',
+        'architecture': {
+            'network_class_name': 'your_project.architectures.swin_unet.SwinUNet',
+            'arch_kwargs': {
+                'n_stages': 5,
+                'features_per_stage': [48, 96, 192, 384, 384],
+                'window_size': [7, 7, 7],
+                'patch_emb_stride': [2, 2, 2],
+                'kernel_sizes': [[3,3,3]]*5,
+                'strides': [[1,1,1], [2,2,2], [2,2,2], [2,2,2], [2,2,2]],
+                'norm_op': 'torch.nn.InstanceNorm3d',
+                'nonlin': 'torch.nn.GELU',
+                'conv_op': 'torch.nn.Conv3d'
+            },
+            '_kw_requires_import': ['conv_op', 'norm_op', 'nonlin']
+        },
+        'resampling_fn_softseg': 'linear',
+        'resampling_fn_softseg_kwargs': {'order': 1, 'do_separate_z': False},
+        'resampling_fn_probabilities': 'linear',
+        'resampling_fn_probabilities_kwargs': {'order': 1, 'do_separate_z': False},
+        'loss': {
+            'name': 'SoftDiceCE',
+            'dice_weight': 1.0,
+            'ce_weight': 1.0,
+            'label_smoothing': 0.0
+        },
+        'uncertainty': {
+            'mc_dropout': {'enable': True, 'passes': 8, 'p': 0.2}
+        }
+    } 
+# changes over
+
     # now get plans and configuration managers
     plans_manager = PlansManager(plans)
     configuration_manager = plans_manager.get_configuration('3d_fullres_bs4')
     print(configuration_manager)  # look for batch size 4
+
+# sanity checks for the new soft config
+    swin_cfg = plans_manager.get_configuration('3d_swinunet_fullres_soft')
+    print('arch:', swin_cfg.network_arch_class_name)
+    print('label_type:', swin_cfg.label_type)
+    print('has softseg fn:', callable(swin_cfg.resampling_fn_softseg))
+# changes over

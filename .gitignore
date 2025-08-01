@@ -114,3 +114,7 @@ ENV/
 *.model
 
 !documentation/assets/scribble_example.png
+
+nnunetv2/framework_25/newdatasets*
+
+framework_25/newdatasets*
