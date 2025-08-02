@@ -10,6 +10,8 @@ from nnunetv2.experiment_planning.experiment_planners.default_experiment_planner
 
 from nnunetv2.experiment_planning.experiment_planners.network_topology import get_pool_and_conv_props
 
+from nnunetv2.nnSwinUNet import nnSwinUNet
+
 
 class SwinUNetPlanner(ExperimentPlanner):
     def __init__(self, dataset_name_or_id, gpu_memory_target_in_gb=8,
@@ -38,6 +40,12 @@ class SwinUNetPlanner(ExperimentPlanner):
 
     def get_plans_for_configuration(self, spacing, median_shape, data_identifier,
                                     approximate_n_voxels_dataset, _cache):
+        
+        
+        # 计算初始patch_size，参考ResEncUNetPlanner
+        # ...
+        num_classes = len(self.dataset_json['labels'].keys())
+
         # 计算输入通道数
         num_input_channels = len(self.dataset_json.get('channel_names', self.dataset_json.get('modality', {})))
         
@@ -46,9 +54,10 @@ class SwinUNetPlanner(ExperimentPlanner):
         
         # 选择卷积操作
         conv_op = convert_dim_to_conv_op(len(spacing))
-        
-        # 计算初始patch_size，参考ResEncUNetPlanner
-        # ...
+
+        norm_op = get_matching_instancenorm(conv_op)
+        deep_supervision = True
+
         def features_per_stage(num_stages, max_num_features) -> Tuple[int, ...]:
             return tuple([min(max_num_features, self.UNet_base_num_features * 2 ** i) for
                           i in range(num_stages)])
@@ -57,8 +66,6 @@ class SwinUNetPlanner(ExperimentPlanner):
             return str(patch_size) + '_' + str(strides)
 
         assert all([i > 0 for i in spacing]), f"Spacing must be > 0! Spacing: {spacing}"
-
-
 
         # 计算网络结构和层数，可能需要自定义函数适配SwinUNet的stage/block数
         # 你可以用get_pool_and_conv_props，但SwinUNet不一定使用普通卷积池化，这里可自定义
@@ -73,8 +80,7 @@ class SwinUNetPlanner(ExperimentPlanner):
             raise RuntimeError()
         
         initial_patch_size = np.minimum(initial_patch_size, median_shape[:len(spacing)])
-        network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
-        shape_must_be_divisible_by = get_pool_and_conv_props(spacing, initial_patch_size,
+        network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, shape_must_be_divisible_by = get_pool_and_conv_props(spacing, initial_patch_size,
                                                              self.UNet_featuremap_min_edge_length,
                                                              999999)
         num_stages = len(pool_op_kernel_sizes)
@@ -102,6 +108,89 @@ class SwinUNetPlanner(ExperimentPlanner):
         
         # 显存估算逻辑和patch_size动态调整（可以复用ResEncUNetPlanner逻辑）
         # ...
+        # now estimate vram consumption
+        if _keygen(patch_size, pool_op_kernel_sizes) in _cache.keys():
+            estimate = _cache[_keygen(patch_size, pool_op_kernel_sizes)]
+        else:
+            estimate = self.static_estimate_VRAM_usage(patch_size,
+                                                       num_input_channels,
+                                                       len(self.dataset_json['labels'].keys()),
+                                                       architecture_kwargs['network_class_name'],
+                                                       architecture_kwargs['arch_kwargs'],
+                                                       architecture_kwargs['_kw_requires_import'],
+                                                       )
+            _cache[_keygen(patch_size, pool_op_kernel_sizes)] = estimate
+
+        # how large is the reference for us here (batch size etc)?
+        # adapt for our vram target
+        reference = (self.UNet_reference_val_2d if len(spacing) == 2 else self.UNet_reference_val_3d) * \
+                    (self.UNet_vram_target_GB / self.UNet_reference_val_corresp_GB)
+
+        while estimate > reference:
+            # print(patch_size)
+            # patch size seems to be too large, so we need to reduce it. Reduce the axis that currently violates the
+            # aspect ratio the most (that is the largest relative to median shape)
+            axis_to_be_reduced = np.argsort([i / j for i, j in zip(patch_size, median_shape[:len(spacing)])])[-1]
+
+            # we cannot simply reduce that axis by shape_must_be_divisible_by[axis_to_be_reduced] because this
+            # may cause us to skip some valid sizes, for example shape_must_be_divisible_by is 64 for a shape of 256.
+            # If we subtracted that we would end up with 192, skipping 224 which is also a valid patch size
+            # (224 / 2**5 = 7; 7 < 2 * self.UNet_featuremap_min_edge_length(4) so it's valid). So we need to first
+            # subtract shape_must_be_divisible_by, then recompute it and then subtract the
+            # recomputed shape_must_be_divisible_by. Annoying.
+            patch_size = list(patch_size)
+            tmp = deepcopy(patch_size)
+            tmp[axis_to_be_reduced] -= shape_must_be_divisible_by[axis_to_be_reduced]
+            _, _, _, _, shape_must_be_divisible_by = \
+                get_pool_and_conv_props(spacing, tmp,
+                                        self.UNet_featuremap_min_edge_length,
+                                        999999)
+            patch_size[axis_to_be_reduced] -= shape_must_be_divisible_by[axis_to_be_reduced]
+
+            # now recompute topology
+            network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
+            shape_must_be_divisible_by = get_pool_and_conv_props(spacing, patch_size,
+                                                                 self.UNet_featuremap_min_edge_length,
+                                                                 999999)
+
+            num_stages = len(pool_op_kernel_sizes)
+            architecture_kwargs['arch_kwargs'].update({
+                'n_stages': num_stages,
+                'kernel_sizes': conv_kernel_sizes,
+                'strides': pool_op_kernel_sizes,
+                'features_per_stage': features_per_stage(num_stages, max_num_features),
+                'n_blocks_per_stage': self.UNet_blocks_per_stage_encoder[:num_stages],
+                'n_conv_per_stage_decoder': self.UNet_blocks_per_stage_decoder[:num_stages - 1],
+            })
+            if _keygen(patch_size, pool_op_kernel_sizes) in _cache.keys():
+                estimate = _cache[_keygen(patch_size, pool_op_kernel_sizes)]
+            else:
+                estimate = self.static_estimate_VRAM_usage(
+                    patch_size,
+                    num_input_channels,
+                    len(self.dataset_json['labels'].keys()),
+                    architecture_kwargs['network_class_name'],
+                    architecture_kwargs['arch_kwargs'],
+                    architecture_kwargs['_kw_requires_import'],
+                )
+                _cache[_keygen(patch_size, pool_op_kernel_sizes)] = estimate
+
+        # alright now let's determine the batch size. This will give self.UNet_min_batch_size if the while loop was
+        # executed. If not, additional vram headroom is used to increase batch size
+        ref_bs = self.UNet_reference_val_corresp_bs_2d if len(spacing) == 2 else self.UNet_reference_val_corresp_bs_3d
+        batch_size = round((reference / estimate) * ref_bs)
+
+        # we need to cap the batch size to cover at most 5% of the entire dataset. Overfitting precaution. We cannot
+        # go smaller than self.UNet_min_batch_size though
+        bs_corresponding_to_5_percent = round(
+            approximate_n_voxels_dataset * self.max_dataset_covered / np.prod(patch_size, dtype=np.float64))
+        batch_size = max(min(batch_size, bs_corresponding_to_5_percent), self.UNet_min_batch_size)
+
+        resampling_data, resampling_data_kwargs, resampling_seg, resampling_seg_kwargs = self.determine_resampling()
+        resampling_softmax, resampling_softmax_kwargs = self.determine_segmentation_softmax_export_fn()
+
+        normalization_schemes, mask_is_used_for_norm = \
+            self.determine_normalization_scheme_and_whether_mask_is_used_for_norm()
         
         # 返回plan字典
         plan = {
