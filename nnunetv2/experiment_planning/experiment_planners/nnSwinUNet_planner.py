@@ -23,12 +23,11 @@ class SwinUNetPlanner(ExperimentPlanner):
                          preprocessor_name, plans_name,
                          overwrite_target_spacing, suppress_transpose)
         
-        # 你自己的SwinUNet类
         self.UNet_class = nnSwinUNet  
-        # 需要参考或调试的基准VRAM参考值（建议先粗略估计）
-        self.UNet_reference_val_3d = 500000000  # 你可以根据模型计算量估计
+        
+        self.UNet_reference_val_3d = 500000000  
         self.UNet_reference_val_2d = 120000000
-        # 例如，SwinTransformer里block数等超参数，可按stage设定
+        
         self.UNet_blocks_per_stage_encoder = (2, 2, 6, 2)
         self.UNet_blocks_per_stage_decoder = (1, 1, 1, 1)
 
@@ -42,17 +41,16 @@ class SwinUNetPlanner(ExperimentPlanner):
                                     approximate_n_voxels_dataset, _cache):
         
         
-        # 计算初始patch_size，参考ResEncUNetPlanner
-        # ...
+        
         num_classes = len(self.dataset_json['labels'].keys())
 
-        # 计算输入通道数
+        
         num_input_channels = len(self.dataset_json.get('channel_names', self.dataset_json.get('modality', {})))
         
-        # 根据2D/3D确定最大特征数
+        
         max_num_features = self.UNet_max_features_2d if len(spacing) == 2 else self.UNet_max_features_3d
         
-        # 选择卷积操作
+        
         conv_op = convert_dim_to_conv_op(len(spacing))
 
         norm_op = get_matching_instancenorm(conv_op)
@@ -67,8 +65,7 @@ class SwinUNetPlanner(ExperimentPlanner):
 
         assert all([i > 0 for i in spacing]), f"Spacing must be > 0! Spacing: {spacing}"
 
-        # 计算网络结构和层数，可能需要自定义函数适配SwinUNet的stage/block数
-        # 你可以用get_pool_and_conv_props，但SwinUNet不一定使用普通卷积池化，这里可自定义
+        
         
         tmp = 1 / np.array(spacing)
         
@@ -86,14 +83,14 @@ class SwinUNetPlanner(ExperimentPlanner):
         num_stages = len(pool_op_kernel_sizes)
 
         norm = get_matching_instancenorm(conv_op)
-        # 构造architecture_kwargs字典，示例：
+        
         architecture_kwargs = {
             'network_class_name': self.UNet_class.__module__ + '.' + self.UNet_class.__name__,
             'arch_kwargs': {
                 'n_stages': num_stages,
                 'features_per_stage': features_per_stage,
-                'embed_dim': 96,             # 例如SwinUNet默认embed_dim
-                'num_heads': [3,6,12,24],   # 每stage头数
+                'embed_dim': 96,             
+                'num_heads': [3,6,12,24],   
                 'window_size': 7,
                 'mlp_ratio': 4.0,
                 'conv_op': conv_op.__module__ + '.' + conv_op.__name__,
@@ -101,14 +98,13 @@ class SwinUNetPlanner(ExperimentPlanner):
                 'dropout_op': None,
                 'nonlin': 'torch.nn.GELU',
                 'num_classes': len(self.dataset_json['labels'].keys()),
-                # 更多SwinUNet自定义参数
+                
             },
             '_kw_requires_import': ('conv_op', 'norm_op', 'dropout_op', 'nonlin'),
         }
         
-        # 显存估算逻辑和patch_size动态调整（可以复用ResEncUNetPlanner逻辑）
-        # ...
-        # now estimate vram consumption
+        
+        # estimate vram consumption
         if _keygen(patch_size, pool_op_kernel_sizes) in _cache.keys():
             estimate = _cache[_keygen(patch_size, pool_op_kernel_sizes)]
         else:
@@ -192,7 +188,7 @@ class SwinUNetPlanner(ExperimentPlanner):
         normalization_schemes, mask_is_used_for_norm = \
             self.determine_normalization_scheme_and_whether_mask_is_used_for_norm()
         
-        # 返回plan字典
+        
         plan = {
             'data_identifier': data_identifier,
             'preprocessor_name': self.preprocessor_name,
